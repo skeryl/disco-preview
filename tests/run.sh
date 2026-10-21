@@ -144,6 +144,14 @@ d=$(setup); printf 'site-pr-1\nsite-pr-10\n' > "$d/state"
 rc=$(STUB_OPEN_PRS="10" PREFIX=site-pr- REPO=o/r run_step "$d" "Sweep")
 grep -qx "site-pr-10" "$d/state" && ok "no prefix-collision deletion" || bad "no prefix-collision deletion"
 
+echo "comment: works without a checkout"
+node -e '
+  const yaml=require(process.env.JS_YAML||"js-yaml"),fs=require("fs");
+  const d=yaml.load(fs.readFileSync("action.yml","utf8"));
+  const s=d.runs.steps.find(s=>s.name==="Comment on the PR");
+  process.exit(s.env && s.env.GH_REPO ? 0 : 1);
+' && ok "sets GH_REPO so gh needs no .git" || bad "sets GH_REPO so gh needs no .git"
+
 echo "comment: falls back to create when there is nothing to edit"
 d=$(setup)
 rc=$(GH_TOKEN=t PR=7 URL="https://site-pr-7.disco.test" PROJECT=site-pr-7 STUB_NO_PRIOR_COMMENT=1 run_step "$d" "Comment on the PR")

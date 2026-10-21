@@ -182,6 +182,9 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
+        # A preview job has no reason to check out the repo, so gh cannot
+        # infer it from a .git directory that is not there.
+        GH_REPO: ${{ github.repository }}
         PR: ${{ github.event.pull_request.number }}
         URL: ${{ steps.deploy.outputs.url }}
         PROJECT: ${{ inputs.project }}
