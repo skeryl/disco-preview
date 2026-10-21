@@ -83,7 +83,13 @@ echo "deploy: a failed server-side deployment is not reported as success"
 d=$(setup)
 rc=$(STUB_DEPLOY_STATUS=FAILED PROJECT=site-pr-7 DIR="$d/build" EXCLUDE="" PUBLIC_PATH="public" run_step "$d" "Deploy")
 check "fails despite the CLI exiting 0" "$rc" "1"
-grep -q "deployment ended as FAILED" "$d/stderr" && ok "names the status" || bad "names the status" "$(cat "$d/stderr")"
+grep -q "ended as FAILED" "$d/stderr" && ok "names the status" || bad "names the status" "$(cat "$d/stderr")"
+
+echo "deploy: a run that creates no new deployment is not success"
+d=$(setup)
+rc=$(STUB_NO_NEW_DEPLOYMENT=1 PROJECT=site-pr-7 DIR="$d/build" EXCLUDE="" PUBLIC_PATH="public" run_step "$d" "Deploy")
+check "fails on a stale deployment list" "$rc" "1"
+grep -q "no deployment newer than" "$d/stderr" && ok "says nothing new was created" || bad "says nothing new was created" "$(cat "$d/stderr")"
 
 echo "deploy: public-path of '.' is refused up front"
 d=$(setup)

@@ -184,23 +184,38 @@ runs:
           printf '%s\n' "$EXCLUDE" | sed 's/^/  /'
         fi
 
+        # Remember where the numbering was, so the status check below cannot
+        # read an older deployment and call it this one's result.
+        before="$(disco deploy:list --project "$PROJECT" --json \
+          | jq -r '[.deployments[].number] | max // 0')"
+
         disco deploy --project "$PROJECT" --dir "$upload"
 
         # `disco deploy` streams the server's output and exits 0 whatever it
         # says, so a deployment that failed and rolled back still looks like
         # a success. Read the status back instead.
-        status=""
+        status=""; number=""
         for _ in $(seq 1 30); do
-          status="$(disco deploy:list --project "$PROJECT" --json \
-            | jq -r '.deployments | sort_by(.number) | last | .status // empty')"
-          case "$status" in COMPLETE|FAILED|CANCELLED) break ;; esac
+          latest="$(disco deploy:list --project "$PROJECT" --json \
+            | jq -c --argjson b "$before" \
+              '[.deployments[] | select(.number > $b)] | sort_by(.number) | last // empty')"
+          if [ -n "$latest" ]; then
+            number="$(printf '%s' "$latest" | jq -r .number)"
+            status="$(printf '%s' "$latest" | jq -r .status)"
+            case "$status" in COMPLETE|FAILED|CANCELLED) break ;; esac
+          fi
           sleep 2
         done
+        if [ -z "$number" ]; then
+          echo "::error::no deployment newer than #$before was created" >&2
+          exit 1
+        fi
         if [ "$status" != "COMPLETE" ]; then
-          echo "::error::deployment ended as ${status:-unknown}" >&2
+          echo "::error::deployment #$number ended as ${status:-unknown}" >&2
           disco deploy:output --project "$PROJECT" 2>&1 | tail -30 || true
           exit 1
         fi
+        echo "deployment #$number is COMPLETE"
 
         domain="$(disco domains:list --project "$PROJECT" --json | jq -r '.domains[0].name // empty')"
         if [ -z "$domain" ]; then

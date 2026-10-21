@@ -45,17 +45,24 @@ case "$cmd" in
     if [ "$pp" = "." ] || [ -z "$pp" ]; then
       echo "Copying static files"; echo "Deployment failed"
       echo "FAILED" > "$STUB_STATE.status"
+      echo $(( $(cat "$STUB_STATE.num" 2>/dev/null || echo 0) + 1 )) > "$STUB_STATE.num"
     elif [ ! -d "$dir/$pp" ]; then
       echo "Deployment failed"; echo "FAILED" > "$STUB_STATE.status"
+      echo $(( $(cat "$STUB_STATE.num" 2>/dev/null || echo 0) + 1 )) > "$STUB_STATE.num"
     else
       echo "${STUB_DEPLOY_STATUS:-COMPLETE}" > "$STUB_STATE.status"
+      [ "${STUB_NO_NEW_DEPLOYMENT:-}" = "1" ] || \
+        echo $(( $(cat "$STUB_STATE.num" 2>/dev/null || echo 0) + 1 )) > "$STUB_STATE.num"
       echo "Deployment complete for $proj from $dir"
     fi
     # Always exit 0: the real CLI does, which is the bug being guarded.
     exit 0 ;;
   deploy:list)
     st="$(cat "$STUB_STATE.status" 2>/dev/null || echo COMPLETE)"
-    jq -n --arg s "$st" '{deployments:[{number:1,created:"now",status:$s,commitHash:null,type:"FILES"}]}' ;;
+    n="$(cat "$STUB_STATE.num" 2>/dev/null || echo 0)"
+    if [ "$n" = "0" ]; then echo '{"deployments":[]}'
+    else jq -n --arg s "$st" --argjson n "$n" \
+      '{deployments:[{number:$n,created:"now",status:$s,commitHash:null,type:"FILES"}]}'; fi ;;
   deploy:output) echo "stub deployment output" ;;
   domains:list)
     proj=""
