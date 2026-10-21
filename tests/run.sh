@@ -109,6 +109,26 @@ d=$(setup); echo "site-pr-7" > "$d/state"
 rc=$(STUB_REMOVE_FAILS=1 PROJECT=site-pr-7 run_step "$d" "Teardown")
 check "surfaces the failure" "$rc" "1"
 
+echo "unreachable server is not mistaken for an absent project"
+d=$(setup); echo "site-pr-7" > "$d/state"
+rc=$(STUB_UNREACHABLE=1 PROJECT=site-pr-7 DIR="$d/build" EXCLUDE="" PUBLIC_PATH="." run_step "$d" "Deploy")
+check "deploy fails loudly" "$rc" "1"
+grep -q "projects:add" "$d/calls" && bad "does not blind-create" || ok "does not blind-create"
+d=$(setup); echo "site-pr-7" > "$d/state"
+rc=$(STUB_UNREACHABLE=1 PROJECT=site-pr-7 run_step "$d" "Teardown")
+check "teardown fails loudly" "$rc" "1"
+grep -q "already gone" "$d/stdout" && bad "does not claim it was gone" || ok "does not claim it was gone"
+
+echo "missing credentials"
+d=$(setup)
+rc=$(DISCO_HOST="" DISCO_API_KEY="k" DISCO_NAME=ci run_step "$d" "Write the CLI config")
+check "rejects an empty host" "$rc" "1"
+grep -q "disco-host is empty" "$d/stderr" && ok "names the missing input" || bad "names the missing input" "$(cat "$d/stderr")"
+d=$(setup)
+rc=$(DISCO_HOST="h" DISCO_API_KEY="k" DISCO_NAME=ci run_step "$d" "Write the CLI config")
+check "accepts both set" "$rc" "0"
+jq -e '.discos.ci.host=="h"' "$d/disco-config.json" >/dev/null && ok "writes the config" || bad "writes the config"
+
 echo "sweep"
 d=$(setup); printf 'site-pr-1\nsite-pr-2\nsite-pr-10\nsite-prod\nother\n' > "$d/state"
 rc=$(STUB_OPEN_PRS="2" PREFIX=site-pr- REPO=o/r run_step "$d" "Sweep")

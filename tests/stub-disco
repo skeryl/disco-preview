@@ -14,7 +14,11 @@ projects_json() {
 }
 
 case "$cmd" in
-  projects:list) projects_json ;;
+  projects:list)
+    if [ "${STUB_UNREACHABLE:-}" = "1" ]; then
+      echo " âº   Error: could not reach the server" >&2; exit 2
+    fi
+    projects_json ;;
   projects:add)
     name=""
     while [ $# -gt 0 ]; do case "$1" in --name) name="$2"; shift 2;; *) shift;; esac; done

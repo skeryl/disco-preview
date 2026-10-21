@@ -90,6 +90,16 @@ runs:
       run: |
         set -euo pipefail
         echo "::add-mask::$DISCO_API_KEY"
+        # A composite action's `required: true` does not reject an empty
+        # string, so an unset secret arrives as "" and the CLI fails much
+        # later with something unrelated-looking about DNS.
+        missing=""
+        [ -n "$DISCO_HOST" ] || missing="disco-host"
+        [ -n "$DISCO_API_KEY" ] || missing="${missing:+$missing and }disco-api-key"
+        if [ -n "$missing" ]; then
+          echo "::error::$missing is empty. Check the secret names, and note that secrets are not available to pull_request runs from forks." >&2
+          exit 1
+        fi
         cfg="${RUNNER_TEMP}/disco-config.json"
         jq -n --arg n "$DISCO_NAME" --arg h "$DISCO_HOST" --arg k "$DISCO_API_KEY" \
           '{discos: {($n): {name: $n, host: $h, apiKey: $k}}}' > "$cfg"
@@ -113,8 +123,14 @@ runs:
         [ -d "$DIR" ] || { echo "::error::dir '$DIR' does not exist" >&2; exit 1; }
 
         # projects:add fails when the project exists, and it will on every
-        # push after the first, so look before creating.
-        if disco projects:list --json | jq -e --arg p "$PROJECT" '.projects[]? | select(.name == $p)' >/dev/null; then
+        # push after the first, so look before creating. A failed list has to
+        # be told apart from an empty one, or an unreachable server reads as
+        # "not there" and we try to create what may already exist.
+        if ! listing="$(disco projects:list --json 2>&1)" || ! printf '%s' "$listing" | jq -e . >/dev/null 2>&1; then
+          echo "::error::could not list projects: $listing" >&2
+          exit 1
+        fi
+        if printf '%s' "$listing" | jq -e --arg p "$PROJECT" '.projects[]? | select(.name == $p)' >/dev/null; then
           echo "project $PROJECT already exists"
         else
           echo "creating project $PROJECT"
@@ -190,7 +206,14 @@ runs:
       run: |
         set -euo pipefail
         [ -n "$PROJECT" ] || { echo "::error::'project' is required when mode is teardown" >&2; exit 1; }
-        if ! disco projects:list --json | jq -e --arg p "$PROJECT" '.projects[]? | select(.name == $p)' >/dev/null; then
+        # Without this, an unreachable server looks exactly like a project
+        # that is already gone, and teardown reports success having done
+        # nothing. That is the failure this job exists to prevent.
+        if ! listing="$(disco projects:list --json 2>&1)" || ! printf '%s' "$listing" | jq -e . >/dev/null 2>&1; then
+          echo "::error::could not list projects: $listing" >&2
+          exit 1
+        fi
+        if ! printf '%s' "$listing" | jq -e --arg p "$PROJECT" '.projects[]? | select(.name == $p)' >/dev/null; then
           echo "project $PROJECT is already gone"
           exit 0
         fi
@@ -198,7 +221,11 @@ runs:
         disco projects:remove "$PROJECT" --no-input
         # projects:remove downgrades API failures to a warning and exits 0,
         # so confirm by listing rather than trusting the exit code.
-        if disco projects:list --json | jq -e --arg p "$PROJECT" '.projects[]? | select(.name == $p)' >/dev/null; then
+        if ! listing="$(disco projects:list --json 2>&1)" || ! printf '%s' "$listing" | jq -e . >/dev/null 2>&1; then
+          echo "::error::could not confirm removal: $listing" >&2
+          exit 1
+        fi
+        if printf '%s' "$listing" | jq -e --arg p "$PROJECT" '.projects[]? | select(.name == $p)' >/dev/null; then
           echo "::error::project $PROJECT still exists after removal" >&2
           exit 1
         fi
