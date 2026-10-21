@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Stub Disco CLI. Projects live in $STUB_STATE (one name per line);
+# every invocation is appended to $STUB_CALLS.
+set -euo pipefail
+printf '%s\n' "disco $*" >> "$STUB_CALLS"
+cmd="${1:-}"; shift || true
+
+projects_json() {
+  if [ -s "$STUB_STATE" ]; then
+    jq -R -s -c 'split("\n") | map(select(length>0)) | {projects: map({name: .})}' < "$STUB_STATE"
+  else
+    echo '{"projects":[]}'
+  fi
+}
+
+case "$cmd" in
+  projects:list) projects_json ;;
+  projects:add)
+    name=""
+    while [ $# -gt 0 ]; do case "$1" in --name) name="$2"; shift 2;; *) shift;; esac; done
+    if grep -qx "$name" "$STUB_STATE" 2>/dev/null; then
+      echo "Project $name already exists" >&2; exit 1
+    fi
+    echo "$name" >> "$STUB_STATE"; echo "Project $name created" ;;
+  projects:remove)
+    name="${1:-}"
+    if ! printf '%s\n' "$@" | grep -qx -- "--no-input"; then
+      echo "STUB: refusing to prompt in a non-interactive shell" >&2; exit 97
+    fi
+    if [ "${STUB_REMOVE_FAILS:-}" = "1" ]; then
+      echo "Warning: could not reach server"; exit 0   # mirrors the real CLI's warn-and-exit-0
+    fi
+    grep -vx "$name" "$STUB_STATE" > "$STUB_STATE.tmp" 2>/dev/null || true
+    mv "$STUB_STATE.tmp" "$STUB_STATE"; echo "Project removed." ;;
+  deploy)
+    proj=""; dir=""
+    while [ $# -gt 0 ]; do case "$1" in --project) proj="$2"; shift 2;; --dir) dir="$2"; shift 2;; *) shift;; esac; done
+    [ -f "$dir/disco.json" ] || { echo "No disco.json in $dir" >&2; exit 1; }
+    echo "Deployment complete for $proj from $dir" ;;
+  domains:list)
+    proj=""
+    while [ $# -gt 0 ]; do case "$1" in --project) proj="$2"; shift 2;; *) shift;; esac; done
+    if [ "${STUB_NO_DOMAIN:-}" = "1" ]; then echo '{"domains":[]}'
+    else jq -n --arg n "$proj.disco.test" '{domains:[{id:"d1",name:$n}]}'; fi ;;
+  --version) echo "disco/1.0.0 stub" ;;
+  *) echo "STUB: unhandled command: $cmd $*" >&2; exit 90 ;;
+esac

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Stub gh. Open PRs come from $STUB_OPEN_PRS (space separated).
+set -euo pipefail
+printf '%s\n' "gh $*" >> "$STUB_CALLS"
+if [ "${1:-}" = "pr" ] && [ "${2:-}" = "list" ]; then
+  for n in ${STUB_OPEN_PRS:-}; do echo "$n"; done
+  exit 0
+fi
+if [ "${1:-}" = "pr" ] && [ "${2:-}" = "comment" ]; then
+  if printf '%s\n' "$@" | grep -qx -- "--edit-last" && [ "${STUB_NO_PRIOR_COMMENT:-1}" = "1" ]; then
+    echo "no comment found to edit" >&2; exit 1
+  fi
+  exit 0
+fi
+echo "STUB: unhandled gh: $*" >&2; exit 90

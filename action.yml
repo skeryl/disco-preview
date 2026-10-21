@@ -1,0 +1,232 @@
+name: Disco Preview
+description: Deploy a built directory to a Disco server as a per-PR preview, and tear it down when the PR closes.
+author: Shane Carroll
+
+branding:
+  icon: zap
+  color: purple
+
+inputs:
+  mode:
+    description: 'deploy, teardown, or sweep.'
+    required: true
+    default: deploy
+  project:
+    description: 'Disco project name. Required for deploy and teardown. e.g. site-pr-42'
+    required: false
+  prefix:
+    description: 'Project name prefix that marks previews. Required for sweep. e.g. site-pr-'
+    required: false
+  dir:
+    description: 'Directory of built files to deploy. Required for deploy.'
+    required: false
+  exclude:
+    description: >-
+      Newline-separated .dockerignore patterns for files to keep out of the upload.
+      Useful for large immutable media that the preview does not need.
+    required: false
+  public-path:
+    description: 'publicPath written into a generated disco.json, relative to dir.'
+    required: false
+    default: '.'
+  disco-host:
+    description: 'Disco server host, e.g. disco.example.com'
+    required: true
+  disco-api-key:
+    description: 'Disco API key. Pass from secrets.'
+    required: true
+  disco-name:
+    description: 'Name for this server in the generated CLI config.'
+    required: false
+    default: ci
+  comment:
+    description: 'Post or update a PR comment with the preview URL (deploy mode).'
+    required: false
+    default: 'true'
+  github-token:
+    description: 'Token used to comment on the PR and, in sweep mode, to list open PRs.'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  url:
+    description: 'The preview URL, e.g. https://site-pr-42.disco.example.com'
+    value: ${{ steps.deploy.outputs.url }}
+  project:
+    description: 'The Disco project that was deployed or removed.'
+    value: ${{ steps.deploy.outputs.project }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install the Disco CLI
+      shell: bash
+      run: |
+        set -euo pipefail
+        if command -v disco >/dev/null 2>&1; then
+          echo "disco already on PATH"
+          exit 0
+        fi
+        # Not on npm: the "disco" npm package is an unrelated DOM library.
+        curl -fsSL https://cli-assets.letsdisco.dev/install.sh | sh
+        # The installer does not always land somewhere later steps can see.
+        if ! command -v disco >/dev/null 2>&1; then
+          for d in /usr/local/bin "$HOME/.local/bin" "$HOME/bin" /opt/disco/bin; do
+            if [ -x "$d/disco" ]; then
+              echo "$d" >> "$GITHUB_PATH"
+              exit 0
+            fi
+          done
+          echo "::error::disco CLI installed but could not be found on PATH" >&2
+          exit 1
+        fi
+
+    - name: Write the CLI config
+      shell: bash
+      env:
+        DISCO_HOST: ${{ inputs.disco-host }}
+        DISCO_API_KEY: ${{ inputs.disco-api-key }}
+        DISCO_NAME: ${{ inputs.disco-name }}
+      run: |
+        set -euo pipefail
+        echo "::add-mask::$DISCO_API_KEY"
+        cfg="${RUNNER_TEMP}/disco-config.json"
+        jq -n --arg n "$DISCO_NAME" --arg h "$DISCO_HOST" --arg k "$DISCO_API_KEY" \
+          '{discos: {($n): {name: $n, host: $h, apiKey: $k}}}' > "$cfg"
+        chmod 600 "$cfg"
+        # src/config.ts honours DISCO_CONFIG_PATH specifically for CI.
+        echo "DISCO_CONFIG_PATH=$cfg" >> "$GITHUB_ENV"
+
+    - name: Deploy
+      id: deploy
+      if: inputs.mode == 'deploy'
+      shell: bash
+      env:
+        PROJECT: ${{ inputs.project }}
+        DIR: ${{ inputs.dir }}
+        EXCLUDE: ${{ inputs.exclude }}
+        PUBLIC_PATH: ${{ inputs.public-path }}
+      run: |
+        set -euo pipefail
+        [ -n "$PROJECT" ] || { echo "::error::'project' is required when mode is deploy" >&2; exit 1; }
+        [ -n "$DIR" ] || { echo "::error::'dir' is required when mode is deploy" >&2; exit 1; }
+        [ -d "$DIR" ] || { echo "::error::dir '$DIR' does not exist" >&2; exit 1; }
+
+        # projects:add fails when the project exists, and it will on every
+        # push after the first, so look before creating.
+        if disco projects:list --json | jq -e --arg p "$PROJECT" '.projects[]? | select(.name == $p)' >/dev/null; then
+          echo "project $PROJECT already exists"
+        else
+          echo "creating project $PROJECT"
+          # No --github: a project deployed from files rather than a repo.
+          # No --domain: it inherits NAME.<server host>, which needs the
+          # server host to have a wildcard DNS record.
+          disco projects:add --name "$PROJECT"
+        fi
+
+        # deploy --dir requires a disco.json at the root of the directory.
+        if [ -f "$DIR/disco.json" ]; then
+          echo "using the disco.json already in $DIR"
+        else
+          jq -n --arg p "$PUBLIC_PATH" \
+            '{version: "1.0", services: {web: {type: "static", publicPath: $p}}}' \
+            > "$DIR/disco.json"
+          echo "wrote disco.json (static, publicPath $PUBLIC_PATH)"
+        fi
+
+        # The CLI applies the directory's own .dockerignore to the upload, so
+        # excluding here costs nothing: the files are never read or sent.
+        if [ -n "$EXCLUDE" ]; then
+          { echo ""; echo "# added by disco-preview"; printf '%s\n' "$EXCLUDE"; } >> "$DIR/.dockerignore"
+          echo "excluding:"
+          printf '%s\n' "$EXCLUDE" | sed 's/^/  /'
+        fi
+
+        disco deploy --project "$PROJECT" --dir "$DIR"
+
+        domain="$(disco domains:list --project "$PROJECT" --json | jq -r '.domains[0].name // empty')"
+        if [ -z "$domain" ]; then
+          echo "::warning::project $PROJECT has no domain; does the server host have a wildcard DNS record?"
+          echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        echo "url=https://$domain" >> "$GITHUB_OUTPUT"
+        echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
+        echo "deployed to https://$domain"
+
+    - name: Comment on the PR
+      if: inputs.mode == 'deploy' && inputs.comment == 'true' && github.event.pull_request.number != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR: ${{ github.event.pull_request.number }}
+        URL: ${{ steps.deploy.outputs.url }}
+        PROJECT: ${{ inputs.project }}
+      run: |
+        set -euo pipefail
+        [ -n "$URL" ] || exit 0
+        body="$(printf '%s\n' \
+          "<!-- disco-preview:$PROJECT -->" \
+          "Preview: $URL" \
+          "" \
+          "Deployed from \`$GITHUB_SHA\`. Torn down when this PR closes.")"
+        # --edit-last keeps one comment instead of one per push, and fails
+        # when there is nothing to edit yet.
+        gh pr comment "$PR" --body "$body" --edit-last 2>/dev/null \
+          || gh pr comment "$PR" --body "$body"
+
+    - name: Teardown
+      if: inputs.mode == 'teardown'
+      shell: bash
+      env:
+        PROJECT: ${{ inputs.project }}
+      run: |
+        set -euo pipefail
+        [ -n "$PROJECT" ] || { echo "::error::'project' is required when mode is teardown" >&2; exit 1; }
+        if ! disco projects:list --json | jq -e --arg p "$PROJECT" '.projects[]? | select(.name == $p)' >/dev/null; then
+          echo "project $PROJECT is already gone"
+          exit 0
+        fi
+        # --no-input or the CLI waits on a confirm prompt that never comes.
+        disco projects:remove "$PROJECT" --no-input
+        # projects:remove downgrades API failures to a warning and exits 0,
+        # so confirm by listing rather than trusting the exit code.
+        if disco projects:list --json | jq -e --arg p "$PROJECT" '.projects[]? | select(.name == $p)' >/dev/null; then
+          echo "::error::project $PROJECT still exists after removal" >&2
+          exit 1
+        fi
+        echo "removed $PROJECT"
+
+    - name: Sweep
+      if: inputs.mode == 'sweep'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PREFIX: ${{ inputs.prefix }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+        [ -n "$PREFIX" ] || { echo "::error::'prefix' is required when mode is sweep" >&2; exit 1; }
+
+        open_prs="$(gh pr list --repo "$REPO" --state open --limit 500 --json number --jq '.[].number' | sort -u)"
+        projects="$(disco projects:list --json | jq -r --arg pre "$PREFIX" '.projects[]? | select(.name | startswith($pre)) | .name')"
+
+        [ -n "$projects" ] || { echo "no projects match $PREFIX"; exit 0; }
+
+        removed=0
+        while IFS= read -r project; do
+          [ -n "$project" ] || continue
+          number="${project#"$PREFIX"}"
+          # Only reap names that end in a PR number; anything else was not
+          # ours to delete.
+          case "$number" in
+            ''|*[!0-9]*) echo "skipping $project (no trailing PR number)"; continue ;;
+          esac
+          if printf '%s\n' "$open_prs" | grep -qx "$number"; then
+            continue
+          fi
+          echo "PR #$number is not open; removing $project"
+          disco projects:remove "$project" --no-input
+          removed=$((removed + 1))
+        done <<< "$projects"
+        echo "swept $removed project(s)"

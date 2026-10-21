@@ -1,0 +1,11 @@
+{
+  "name": "disco-preview",
+  "private": true,
+  "description": "Test harness for the disco-preview composite action. The action itself is action.yml and ships no JavaScript.",
+  "scripts": {
+    "test": "tests/run.sh"
+  },
+  "devDependencies": {
+    "js-yaml": "^4.1.0"
+  }
+}
