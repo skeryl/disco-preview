@@ -70,7 +70,7 @@ jobs:
 | `prefix` | sweep | | Prefix marking preview projects, e.g. `site-pr-` |
 | `dir` | deploy | | Directory of built files |
 | `exclude` | no | | Newline-separated `.dockerignore` patterns to keep out of the upload |
-| `public-path` | no | `.` | `publicPath` for a generated `disco.json` |
+| `public-path` | no | `public` | Subdirectory the build is staged at inside the upload. Cannot be `.` |
 | `disco-host` | yes | | Disco server host |
 | `disco-api-key` | yes | | Disco API key, from secrets |
 | `disco-name` | no | `ci` | Name for the server in the generated CLI config |
@@ -114,6 +114,31 @@ action warns when a pattern starts with `*.` for this reason.
 Content-hashed media is identical on every push and identical to production, so excluding it can
 turn a 98MB upload into about 2MB without changing anything a reviewer looks at. A PR that
 actually changes a video is the exception; re-include those paths with a `!` line.
+
+## Why the build is staged one level down
+
+`deploy --dir` needs a `disco.json` at the root of what it uploads, and the build cannot sit
+beside it. The daemon resolves `publicPath` and then checks it:
+
+```python
+path = os.path.abspath(f"{project_path(project_name)}/{public_path}")
+if not path.startswith(f"{project_path(project_name)}/"):
+    raise Exception("publicPath must be inside project folder")
+```
+
+`abspath` normalises the trailing `/.` away, so `publicPath: "."` resolves to exactly the project
+path and fails a check that insists on a trailing slash. No value can name the upload root. The
+action therefore hardlinks the build into `public/` inside a staging directory and writes
+`disco.json` above it, which costs no extra disk and leaves your build directory untouched.
+
+If you supply your own `disco.json` in `dir`, the action assumes you have laid things out
+yourself and uploads the directory as-is.
+
+## Deployment failures
+
+`disco deploy` streams the server's output and exits 0 regardless of what it says, so a
+deployment that failed and rolled back still looks like a success to CI. The action reads the
+status back from `deploy:list` and fails unless it is `COMPLETE`.
 
 ## Previews on pull requests from forks
 

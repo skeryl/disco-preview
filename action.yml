@@ -26,9 +26,12 @@ inputs:
       Useful for large immutable media that the preview does not need.
     required: false
   public-path:
-    description: 'publicPath written into a generated disco.json, relative to dir.'
+    description: >-
+      Subdirectory inside the upload that the build is placed in, and the
+      publicPath written into a generated disco.json. Cannot be '.': the
+      daemon's traversal guard rejects the upload root.
     required: false
-    default: '.'
+    default: public
   disco-host:
     description: 'Disco server host, e.g. disco.example.com'
     required: true
@@ -141,13 +144,29 @@ runs:
         fi
 
         # deploy --dir requires a disco.json at the root of the directory.
+        # The build cannot sit at that root: static_site_src_public_path
+        # resolves publicPath with abspath and then demands the result start
+        # with "<project>/", which "." can never do once the "/." is
+        # normalised away. So the files go one level down.
         if [ -f "$DIR/disco.json" ]; then
           echo "using the disco.json already in $DIR"
+          upload="$DIR"
         else
+          case "$PUBLIC_PATH" in
+            ''|'.'|'./')
+              echo "::error::public-path cannot be '$PUBLIC_PATH'; the daemon rejects the upload root. Use a subdirectory name." >&2
+              exit 1 ;;
+          esac
+          upload="${RUNNER_TEMP}/disco-preview-upload"
+          rm -rf "$upload"
+          mkdir -p "$upload"
+          # Hardlinks, so a 98MB build is not copied twice on the runner.
+          cp -al "$DIR" "$upload/$PUBLIC_PATH" 2>/dev/null \
+            || cp -a "$DIR" "$upload/$PUBLIC_PATH"
           jq -n --arg p "$PUBLIC_PATH" \
             '{version: "1.0", services: {web: {type: "static", publicPath: $p}}}' \
-            > "$DIR/disco.json"
-          echo "wrote disco.json (static, publicPath $PUBLIC_PATH)"
+            > "$upload/disco.json"
+          echo "staged $DIR at $PUBLIC_PATH/ with a generated disco.json"
         fi
 
         # The CLI applies the directory's own .dockerignore to the upload, so
@@ -157,15 +176,31 @@ runs:
           # *.mp4 silently matches nothing nested and the upload stays large.
           while IFS= read -r pat; do
             case "$pat" in
-              '*.'*) echo "::warning::exclude pattern '$pat' only matches files at the root of $DIR; use '**/$pat' to match nested files too" ;;
+              '*.'*) echo "::warning::exclude pattern '$pat' only matches files at the root of the upload; use '**/$pat' to match nested files too" ;;
             esac
           done <<< "$EXCLUDE"
-          { echo ""; echo "# added by disco-preview"; printf '%s\n' "$EXCLUDE"; } >> "$DIR/.dockerignore"
+          { echo ""; echo "# added by disco-preview"; printf '%s\n' "$EXCLUDE"; } >> "$upload/.dockerignore"
           echo "excluding:"
           printf '%s\n' "$EXCLUDE" | sed 's/^/  /'
         fi
 
-        disco deploy --project "$PROJECT" --dir "$DIR"
+        disco deploy --project "$PROJECT" --dir "$upload"
+
+        # `disco deploy` streams the server's output and exits 0 whatever it
+        # says, so a deployment that failed and rolled back still looks like
+        # a success. Read the status back instead.
+        status=""
+        for _ in $(seq 1 30); do
+          status="$(disco deploy:list --project "$PROJECT" --json \
+            | jq -r '.deployments | sort_by(.number) | last | .status // empty')"
+          case "$status" in COMPLETE|FAILED|CANCELLED) break ;; esac
+          sleep 2
+        done
+        if [ "$status" != "COMPLETE" ]; then
+          echo "::error::deployment ended as ${status:-unknown}" >&2
+          disco deploy:output --project "$PROJECT" 2>&1 | tail -30 || true
+          exit 1
+        fi
 
         domain="$(disco domains:list --project "$PROJECT" --json | jq -r '.domains[0].name // empty')"
         if [ -z "$domain" ]; then

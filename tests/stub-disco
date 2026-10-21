@@ -40,7 +40,23 @@ case "$cmd" in
     proj=""; dir=""
     while [ $# -gt 0 ]; do case "$1" in --project) proj="$2"; shift 2;; --dir) dir="$2"; shift 2;; *) shift;; esac; done
     [ -f "$dir/disco.json" ] || { echo "No disco.json in $dir" >&2; exit 1; }
-    echo "Deployment complete for $proj from $dir" ;;
+    # The daemon rejects publicPath "."; mirror that so the test can see it.
+    pp="$(jq -r '.services.web.publicPath // empty' "$dir/disco.json")"
+    if [ "$pp" = "." ] || [ -z "$pp" ]; then
+      echo "Copying static files"; echo "Deployment failed"
+      echo "FAILED" > "$STUB_STATE.status"
+    elif [ ! -d "$dir/$pp" ]; then
+      echo "Deployment failed"; echo "FAILED" > "$STUB_STATE.status"
+    else
+      echo "${STUB_DEPLOY_STATUS:-COMPLETE}" > "$STUB_STATE.status"
+      echo "Deployment complete for $proj from $dir"
+    fi
+    # Always exit 0: the real CLI does, which is the bug being guarded.
+    exit 0 ;;
+  deploy:list)
+    st="$(cat "$STUB_STATE.status" 2>/dev/null || echo COMPLETE)"
+    jq -n --arg s "$st" '{deployments:[{number:1,created:"now",status:$s,commitHash:null,type:"FILES"}]}' ;;
+  deploy:output) echo "stub deployment output" ;;
   domains:list)
     proj=""
     while [ $# -gt 0 ]; do case "$1" in --project) proj="$2"; shift 2;; *) shift;; esac; done

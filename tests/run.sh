@@ -43,52 +43,66 @@ check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected [$3] got [$2]
 
 echo "deploy: fresh project"
 d=$(setup)
-rc=$(PROJECT=site-pr-7 DIR="$d/build" EXCLUDE="" PUBLIC_PATH="." run_step "$d" "Deploy")
+rc=$(PROJECT=site-pr-7 DIR="$d/build" EXCLUDE="" PUBLIC_PATH="public" run_step "$d" "Deploy")
 check "exit 0" "$rc" "0"
 grep -q "projects:add --name site-pr-7" "$d/calls" && ok "created the project" || bad "created the project"
-[ -f "$d/build/disco.json" ] && ok "wrote disco.json" || bad "wrote disco.json"
-jq -e '.services.web.type=="static" and .services.web.publicPath=="."' "$d/build/disco.json" >/dev/null \
-  && ok "disco.json is a static service" || bad "disco.json is a static service"
+[ -f "$d/disco-preview-upload/disco.json" ] && ok "staged a disco.json above the build" || bad "staged a disco.json above the build"
+jq -e '.services.web.type=="static" and .services.web.publicPath=="public"' "$d/disco-preview-upload/disco.json" >/dev/null \
+  && ok "publicPath is a subdirectory, never '.'" || bad "publicPath is a subdirectory, never '.'"
+[ -f "$d/disco-preview-upload/public/index.html" ] && ok "build staged under public/" || bad "build staged under public/"
+[ -f "$d/build/disco.json" ] && bad "leaves the build dir alone" || ok "leaves the build dir alone"
 grep -q "url=https://site-pr-7.disco.test" "$d/output" && ok "set the url output" || bad "set the url output" "$(cat "$d/output")"
 
 echo "deploy: project already exists (a second push)"
 d=$(setup); echo "site-pr-7" > "$d/state"
-rc=$(PROJECT=site-pr-7 DIR="$d/build" EXCLUDE="" PUBLIC_PATH="." run_step "$d" "Deploy")
+rc=$(PROJECT=site-pr-7 DIR="$d/build" EXCLUDE="" PUBLIC_PATH="public" run_step "$d" "Deploy")
 check "exit 0" "$rc" "0"
 grep -q "projects:add" "$d/calls" && bad "skips create when it exists" || ok "skips create when it exists"
 
 echo "deploy: exclude patterns"
 d=$(setup)
-rc=$(PROJECT=site-pr-7 DIR="$d/build" EXCLUDE=$'*.mp4\n*.webm' PUBLIC_PATH="." run_step "$d" "Deploy")
+rc=$(PROJECT=site-pr-7 DIR="$d/build" EXCLUDE=$'*.mp4\n*.webm' PUBLIC_PATH="public" run_step "$d" "Deploy")
 check "exit 0" "$rc" "0"
-grep -q '^\*\.mp4$' "$d/build/.dockerignore" && ok "wrote exclude patterns" || bad "wrote exclude patterns" "$(cat "$d/build/.dockerignore" 2>&1)"
+grep -q '^\*\.mp4$' "$d/disco-preview-upload/.dockerignore" && ok "wrote exclude patterns" || bad "wrote exclude patterns" "$(cat "$d/disco-preview-upload/.dockerignore" 2>&1)"
 
 echo "deploy: warns about non-recursive exclude patterns"
 d=$(setup)
-rc=$(PROJECT=site-pr-7 DIR="$d/build" EXCLUDE=$'*.mp4' PUBLIC_PATH="." run_step "$d" "Deploy")
+rc=$(PROJECT=site-pr-7 DIR="$d/build" EXCLUDE=$'*.mp4' PUBLIC_PATH="public" run_step "$d" "Deploy")
 check "exit 0" "$rc" "0"
 grep -q "::warning::exclude pattern" "$d/stdout" && ok "warns on a root-only pattern" || bad "warns on a root-only pattern"
 d=$(setup)
-rc=$(PROJECT=site-pr-7 DIR="$d/build" EXCLUDE=$'**/*.mp4' PUBLIC_PATH="." run_step "$d" "Deploy")
+rc=$(PROJECT=site-pr-7 DIR="$d/build" EXCLUDE=$'**/*.mp4' PUBLIC_PATH="public" run_step "$d" "Deploy")
 grep -q "::warning::exclude pattern" "$d/stdout" && bad "quiet on a recursive pattern" || ok "quiet on a recursive pattern"
 
 echo "deploy: respects an existing disco.json"
 d=$(setup); echo '{"version":"1.0","services":{"web":{"type":"static","publicPath":"public"}}}' > "$d/build/disco.json"
-rc=$(PROJECT=site-pr-7 DIR="$d/build" EXCLUDE="" PUBLIC_PATH="." run_step "$d" "Deploy")
+rc=$(PROJECT=site-pr-7 DIR="$d/build" EXCLUDE="" PUBLIC_PATH="public" run_step "$d" "Deploy")
 jq -e '.services.web.publicPath=="public"' "$d/build/disco.json" >/dev/null && ok "did not clobber it" || bad "did not clobber it"
+
+echo "deploy: a failed server-side deployment is not reported as success"
+d=$(setup)
+rc=$(STUB_DEPLOY_STATUS=FAILED PROJECT=site-pr-7 DIR="$d/build" EXCLUDE="" PUBLIC_PATH="public" run_step "$d" "Deploy")
+check "fails despite the CLI exiting 0" "$rc" "1"
+grep -q "deployment ended as FAILED" "$d/stderr" && ok "names the status" || bad "names the status" "$(cat "$d/stderr")"
+
+echo "deploy: public-path of '.' is refused up front"
+d=$(setup)
+rc=$(PROJECT=site-pr-7 DIR="$d/build" EXCLUDE="" PUBLIC_PATH="." run_step "$d" "Deploy")
+check "rejected" "$rc" "1"
+grep -q "daemon rejects the upload root" "$d/stderr" && ok "explains why" || bad "explains why"
 
 echo "deploy: no domain on the server"
 d=$(setup)
-rc=$(STUB_NO_DOMAIN=1 PROJECT=site-pr-7 DIR="$d/build" EXCLUDE="" PUBLIC_PATH="." run_step "$d" "Deploy")
+rc=$(STUB_NO_DOMAIN=1 PROJECT=site-pr-7 DIR="$d/build" EXCLUDE="" PUBLIC_PATH="public" run_step "$d" "Deploy")
 check "exits 0 anyway" "$rc" "0"
 grep -q "::warning::" "$d/stdout" && ok "warns about wildcard DNS" || bad "warns about wildcard DNS"
 
 echo "deploy: missing inputs"
 d=$(setup)
-rc=$(PROJECT="" DIR="$d/build" EXCLUDE="" PUBLIC_PATH="." run_step "$d" "Deploy")
+rc=$(PROJECT="" DIR="$d/build" EXCLUDE="" PUBLIC_PATH="public" run_step "$d" "Deploy")
 check "fails without project" "$rc" "1"
 d=$(setup)
-rc=$(PROJECT=site-pr-7 DIR="$d/nope" EXCLUDE="" PUBLIC_PATH="." run_step "$d" "Deploy")
+rc=$(PROJECT=site-pr-7 DIR="$d/nope" EXCLUDE="" PUBLIC_PATH="public" run_step "$d" "Deploy")
 check "fails on a missing dir" "$rc" "1"
 
 echo "teardown"
@@ -111,7 +125,7 @@ check "surfaces the failure" "$rc" "1"
 
 echo "unreachable server is not mistaken for an absent project"
 d=$(setup); echo "site-pr-7" > "$d/state"
-rc=$(STUB_UNREACHABLE=1 PROJECT=site-pr-7 DIR="$d/build" EXCLUDE="" PUBLIC_PATH="." run_step "$d" "Deploy")
+rc=$(STUB_UNREACHABLE=1 PROJECT=site-pr-7 DIR="$d/build" EXCLUDE="" PUBLIC_PATH="public" run_step "$d" "Deploy")
 check "deploy fails loudly" "$rc" "1"
 grep -q "projects:add" "$d/calls" && bad "does not blind-create" || ok "does not blind-create"
 d=$(setup); echo "site-pr-7" > "$d/state"
