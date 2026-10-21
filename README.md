@@ -162,6 +162,11 @@ current head against the commit this run built, and steps aside when they differ
 concurrency is not configured, and it stops a manual re-run of an old job from republishing a
 stale preview.
 
+A project the sweep cannot resolve to a PR at all, which a prefix shared across repositories
+would produce, is left alone and warned about on every run rather than deleted. Telling "this PR
+does not exist" apart from "GitHub did not answer" means matching on error text, and being wrong
+there deletes something; being wrong the other way leaves a project for a human to remove.
+
 Note the deliberate asymmetry with the sweep. There, a check that cannot be answered means do
 nothing, because a wrong deletion is unrecoverable. Here, a check that cannot be answered means
 go ahead, because the worst case is a stale preview that the next push corrects.

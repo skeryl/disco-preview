@@ -422,7 +422,12 @@ runs:
           # hiccuped is indistinguishable from every PR being closed, and this
           # job deletes things unattended. Delete only on a definite answer.
           if ! state="$(gh pr view "$number" --repo "$REPO" --json state --jq .state 2>&1)"; then
-            echo "::warning::could not check PR #$number ($state); leaving $project alone"
+            # Includes the case where the PR does not exist at all, which a
+            # prefix shared across repositories would produce. Telling that
+            # apart from an outage means matching on error text, and getting
+            # it wrong deletes something; a project left behind is a nuisance
+            # a human can clear up.
+            echo "::warning::could not check PR #$number ($state); leaving $project alone. If this repeats, remove it by hand."
             skipped=$((skipped + 1)); continue
           fi
           case "$state" in
