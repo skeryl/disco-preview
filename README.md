@@ -101,10 +101,15 @@ Until that asymmetry is fixed upstream, keep large immutable assets out of previ
 
 ```yaml
   exclude: |
-    _app/immutable/assets/*.mp4
-    _app/immutable/assets/*.webm
-    _app/immutable/assets/*.mov
+    **/*.mp4
+    **/*.webm
+    **/*.mov
 ```
+
+**Patterns need `**/` to reach nested files.** `.dockerignore` matches from the root of the
+directory, so a bare `*.mp4` matches only `./foo.mp4` and silently skips
+`_app/immutable/assets/foo.mp4`. Nothing errors; the upload is just as large as before. The
+action warns when a pattern starts with `*.` for this reason.
 
 Content-hashed media is identical on every push and identical to production, so excluding it can
 turn a 98MB upload into about 2MB without changing anything a reviewer looks at. A PR that

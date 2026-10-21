@@ -63,6 +63,15 @@ rc=$(PROJECT=site-pr-7 DIR="$d/build" EXCLUDE=$'*.mp4\n*.webm' PUBLIC_PATH="." r
 check "exit 0" "$rc" "0"
 grep -q '^\*\.mp4$' "$d/build/.dockerignore" && ok "wrote exclude patterns" || bad "wrote exclude patterns" "$(cat "$d/build/.dockerignore" 2>&1)"
 
+echo "deploy: warns about non-recursive exclude patterns"
+d=$(setup)
+rc=$(PROJECT=site-pr-7 DIR="$d/build" EXCLUDE=$'*.mp4' PUBLIC_PATH="." run_step "$d" "Deploy")
+check "exit 0" "$rc" "0"
+grep -q "::warning::exclude pattern" "$d/stdout" && ok "warns on a root-only pattern" || bad "warns on a root-only pattern"
+d=$(setup)
+rc=$(PROJECT=site-pr-7 DIR="$d/build" EXCLUDE=$'**/*.mp4' PUBLIC_PATH="." run_step "$d" "Deploy")
+grep -q "::warning::exclude pattern" "$d/stdout" && bad "quiet on a recursive pattern" || ok "quiet on a recursive pattern"
+
 echo "deploy: respects an existing disco.json"
 d=$(setup); echo '{"version":"1.0","services":{"web":{"type":"static","publicPath":"public"}}}' > "$d/build/disco.json"
 rc=$(PROJECT=site-pr-7 DIR="$d/build" EXCLUDE="" PUBLIC_PATH="." run_step "$d" "Deploy")

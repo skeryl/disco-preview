@@ -137,6 +137,13 @@ runs:
         # The CLI applies the directory's own .dockerignore to the upload, so
         # excluding here costs nothing: the files are never read or sent.
         if [ -n "$EXCLUDE" ]; then
+          # .dockerignore matches from the root of the directory, so a bare
+          # *.mp4 silently matches nothing nested and the upload stays large.
+          while IFS= read -r pat; do
+            case "$pat" in
+              '*.'*) echo "::warning::exclude pattern '$pat' only matches files at the root of $DIR; use '**/$pat' to match nested files too" ;;
+            esac
+          done <<< "$EXCLUDE"
           { echo ""; echo "# added by disco-preview"; printf '%s\n' "$EXCLUDE"; } >> "$DIR/.dockerignore"
           echo "excluding:"
           printf '%s\n' "$EXCLUDE" | sed 's/^/  /'
