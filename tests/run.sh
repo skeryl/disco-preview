@@ -49,6 +49,29 @@ ok()   { PASS=$((PASS+1)); printf '  \033[32mok\033[0m   %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "$1"; [ -n "${2:-}" ] && printf '       %s\n' "$2"; }
 check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected [$3] got [$2]"; fi; }
 
+echo "docs: the inputs table matches the action"
+node -e '
+  const yaml=require(process.env.JS_YAML||"js-yaml"),fs=require("fs");
+  const d=yaml.load(fs.readFileSync("action.yml","utf8"));
+  const md=fs.readFileSync("README.md","utf8");
+  const norm=s=>s.replace("${{ github.token }}","github.token");
+  let bad=[];
+  for (const [name,spec] of Object.entries(d.inputs)) {
+    const row=md.split("\n").find(l=>l.startsWith("| `"+name+"`"));
+    if(!row){bad.push(name+": absent from the table");continue;}
+    const want=spec.default===undefined?"":norm(String(spec.default));
+    const got=row.split("|").map(x=>x.trim())[3].replace(/`/g,"");
+    if(want!==got) bad.push(name+": default is "+JSON.stringify(want)+", table says "+JSON.stringify(got));
+  }
+  for (const m of md.matchAll(/^\| `([a-z-]+)` \|/gm))
+    if(!(m[1] in d.inputs)) bad.push(m[1]+": documented but not an input");
+  for (const o of Object.keys(d.outputs))
+    if(!md.includes("`"+o+"`")) bad.push("output "+o+" undocumented");
+  if(bad.length){console.error(bad.join("\n"));process.exit(1);}
+' 2>"$ROOT/.doccheck" && ok "every input documented with the right default" \
+  || bad "every input documented with the right default" "$(cat "$ROOT/.doccheck")"
+rm -f "$ROOT/.doccheck"
+
 echo "deploy: fresh project"
 d=$(setup)
 rc=$(PROJECT=site-pr-7 DIR="$d/build" EXCLUDE="" PUBLIC_PATH="public" CLEAN_URLS=true run_step "$d" "Deploy")
