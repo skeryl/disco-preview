@@ -6,19 +6,22 @@ branding:
   icon: zap
   color: purple
 
+# GitHub does not enforce `required` on a composite action's inputs, and these
+# requirements depend on `mode` anyway, so only the two that every mode needs
+# are marked required. The rest say when they apply and are checked at runtime.
 inputs:
   mode:
     description: 'deploy, teardown, or sweep.'
-    required: true
+    required: false
     default: deploy
   project:
-    description: 'Disco project name. Required for deploy and teardown. e.g. site-pr-42'
+    description: 'Disco project name, e.g. site-pr-42. Needed when mode is deploy or teardown.'
     required: false
   prefix:
-    description: 'Project name prefix that marks previews. Required for sweep. e.g. site-pr-'
+    description: 'Project name prefix that marks previews, e.g. site-pr-. Needed when mode is sweep.'
     required: false
   dir:
-    description: 'Directory of built files to deploy. Required for deploy.'
+    description: 'Directory of built files to deploy. Needed when mode is deploy.'
     required: false
   clean-urls:
     description: >-
@@ -29,14 +32,16 @@ inputs:
     default: 'true'
   exclude:
     description: >-
-      Newline-separated .dockerignore patterns for files to keep out of the upload.
-      Useful for large immutable media that the preview does not need.
+      Newline-separated .dockerignore patterns for files to keep out of the
+      upload. Excluded files 404 in the preview, so leave out only what you do
+      not need to review.
     required: false
   public-path:
     description: >-
-      Subdirectory inside the upload that the build is placed in, and the
+      Subdirectory inside the upload that the build is staged at, and the
       publicPath written into a generated disco.json. Cannot be '.': the
-      daemon's traversal guard rejects the upload root.
+      daemon's traversal guard rejects the upload root. Ignored when dir
+      already contains a disco.json.
     required: false
     default: public
   disco-host:
@@ -54,7 +59,7 @@ inputs:
     required: false
     default: 'true'
   github-token:
-    description: 'Token used to comment on the PR and, in sweep mode, to list open PRs.'
+    description: 'Token used to comment on the PR and, in sweep mode, to check PR state.'
     required: false
     default: ${{ github.token }}
 
@@ -63,7 +68,7 @@ outputs:
     description: 'The preview URL, e.g. https://site-pr-42.disco.example.com'
     value: ${{ steps.deploy.outputs.url }}
   project:
-    description: 'The Disco project that was deployed or removed.'
+    description: 'The Disco project that was deployed.'
     value: ${{ steps.deploy.outputs.project }}
 
 runs:
@@ -110,6 +115,7 @@ runs:
           echo "::error::$missing is empty. Check the secret names, and note that secrets are not available to pull_request runs from forks." >&2
           exit 1
         fi
+        [ -n "${RUNNER_TEMP:-}" ] || { echo "::error::RUNNER_TEMP is not set" >&2; exit 1; }
         cfg="${RUNNER_TEMP}/disco-config.json"
         jq -n --arg n "$DISCO_NAME" --arg h "$DISCO_HOST" --arg k "$DISCO_API_KEY" \
           '{discos: {($n): {name: $n, host: $h, apiKey: $k}}}' > "$cfg"
@@ -132,6 +138,7 @@ runs:
         [ -n "$PROJECT" ] || { echo "::error::'project' is required when mode is deploy" >&2; exit 1; }
         [ -n "$DIR" ] || { echo "::error::'dir' is required when mode is deploy" >&2; exit 1; }
         [ -d "$DIR" ] || { echo "::error::dir '$DIR' does not exist" >&2; exit 1; }
+        [ -n "${RUNNER_TEMP:-}" ] || { echo "::error::RUNNER_TEMP is not set" >&2; exit 1; }
 
         # projects:add fails when the project exists, and it will on every
         # push after the first, so look before creating. A failed list has to
@@ -148,66 +155,89 @@ runs:
           # No --github: a project deployed from files rather than a repo.
           # No --domain: it inherits NAME.<server host>, which needs the
           # server host to have a wildcard DNS record.
-          disco projects:add --name "$PROJECT"
+          if ! add_out="$(disco projects:add --name "$PROJECT" 2>&1)"; then
+            # Two pushes in quick succession each check, then each create.
+            # Losing that race is fine as long as the project now exists.
+            if disco projects:list --json 2>/dev/null \
+              | jq -e --arg p "$PROJECT" '.projects[]? | select(.name == $p)' >/dev/null; then
+              echo "project $PROJECT appeared concurrently; carrying on"
+            else
+              echo "::error::could not create project $PROJECT: $add_out" >&2
+              exit 1
+            fi
+          fi
         fi
 
-        # deploy --dir requires a disco.json at the root of the directory.
-        # The build cannot sit at that root: static_site_src_public_path
-        # resolves publicPath with abspath and then demands the result start
-        # with "<project>/", which "." can never do once the "/." is
-        # normalised away. So the files go one level down.
+        # Everything is staged under RUNNER_TEMP. The caller's build directory
+        # is never written to: a self-hosted runner reuses its workspace, so
+        # appending to a .dockerignore there would compound on every run.
+        upload="${RUNNER_TEMP}/disco-preview-upload"
+        rm -rf "$upload"
+        mkdir -p "$upload"
+
         if [ -f "$DIR/disco.json" ]; then
-          echo "using the disco.json already in $DIR"
-          upload="$DIR"
+          # The caller laid this out themselves. Copy it as it is and take
+          # publicPath from their file rather than guessing at it.
+          cp -al "$DIR/." "$upload/" 2>/dev/null || cp -a "$DIR/." "$upload/"
+          site_root="$upload/$(jq -r '.services.web.publicPath // "dist"' "$upload/disco.json")"
+          echo "using the disco.json from $DIR"
         else
+          # deploy --dir wants a disco.json at the root of what it uploads, and
+          # the build cannot sit beside it: static_site_src_public_path resolves
+          # publicPath with abspath, which normalises the trailing "/." away,
+          # then demands the result start with "<project>/". The root resolves
+          # to exactly "<project>" and fails. So the files go one level down.
           case "$PUBLIC_PATH" in
-            ''|'.'|'./')
-              echo "::error::public-path cannot be '$PUBLIC_PATH'; the daemon rejects the upload root. Use a subdirectory name." >&2
+            ''|'.'|'./'|/*|*..*)
+              echo "::error::public-path cannot be '$PUBLIC_PATH'; the daemon rejects the upload root and paths outside it. Use a subdirectory name." >&2
               exit 1 ;;
           esac
-          upload="${RUNNER_TEMP}/disco-preview-upload"
-          rm -rf "$upload"
-          mkdir -p "$upload"
-          # Hardlinks, so a 98MB build is not copied twice on the runner.
+          mkdir -p "$(dirname "$upload/$PUBLIC_PATH")"
+          # Hardlinks, so a large build is not copied twice on the runner.
           cp -al "$DIR" "$upload/$PUBLIC_PATH" 2>/dev/null \
             || cp -a "$DIR" "$upload/$PUBLIC_PATH"
           jq -n --arg p "$PUBLIC_PATH" \
             '{version: "1.0", services: {web: {type: "static", publicPath: $p}}}' \
             > "$upload/disco.json"
+          site_root="$upload/$PUBLIC_PATH"
           echo "staged $DIR at $PUBLIC_PATH/ with a generated disco.json"
         fi
 
         # Caddy's file_server serves what is on disk and nothing more: it does
         # not try a .html extension the way GitHub Pages and Netlify do, so
-        # /about 404s next to an about.html. Give each page a directory index
-        # too. Only inside the staging copy, never in the caller's build.
-        if [ "$CLEAN_URLS" = "true" ] && [ "$upload" != "$DIR" ]; then
-          linked=0
-          while IFS= read -r -d '' f; do
-            d="${f%.html}"
-            # journal.html can sit beside a real journal/ directory; the
-            # index belongs inside it either way.
-            [ -e "$d/index.html" ] && continue
-            mkdir -p "$d"
-            ln "$f" "$d/index.html" 2>/dev/null || cp "$f" "$d/index.html"
-            linked=$((linked + 1))
-          done < <(find "$upload/$PUBLIC_PATH" -type f -name '*.html' ! -name 'index.html' -print0)
-          echo "clean urls: added $linked directory index(es)"
+        # /about 404s next to an about.html. Give each page a directory index.
+        if [ "$CLEAN_URLS" = "true" ]; then
+          if [ ! -d "$site_root" ]; then
+            echo "::warning::publicPath does not resolve to a directory; skipping clean urls"
+          else
+            linked=0
+            while IFS= read -r -d '' f; do
+              d="${f%.html}"
+              # journal.html can sit beside a real journal/ directory; the
+              # index belongs inside it either way.
+              if [ -e "$d/index.html" ]; then continue; fi
+              mkdir -p "$d"
+              ln "$f" "$d/index.html" 2>/dev/null || cp "$f" "$d/index.html"
+              linked=$((linked + 1))
+            done < <(find "$site_root" -type f -name '*.html' ! -name 'index.html' -print0)
+            echo "clean urls: added $linked directory index(es)"
+          fi
         fi
 
-        # The CLI applies the directory's own .dockerignore to the upload, so
+        # The CLI applies the upload directory's own .dockerignore, so
         # excluding here costs nothing: the files are never read or sent.
-        if [ -n "$EXCLUDE" ]; then
+        patterns="$(printf '%s\n' "$EXCLUDE" | sed '/^[[:space:]]*$/d')"
+        if [ -n "$patterns" ]; then
           # .dockerignore matches from the root of the directory, so a bare
           # *.mp4 silently matches nothing nested and the upload stays large.
           while IFS= read -r pat; do
             case "$pat" in
               '*.'*) echo "::warning::exclude pattern '$pat' only matches files at the root of the upload; use '**/$pat' to match nested files too" ;;
             esac
-          done <<< "$EXCLUDE"
-          { echo ""; echo "# added by disco-preview"; printf '%s\n' "$EXCLUDE"; } >> "$upload/.dockerignore"
+          done <<< "$patterns"
+          { echo ""; echo "# added by disco-preview"; printf '%s\n' "$patterns"; } >> "$upload/.dockerignore"
           echo "excluding:"
-          printf '%s\n' "$EXCLUDE" | sed 's/^/  /'
+          printf '%s\n' "$patterns" | sed 's/^/  /'
         fi
 
         # Remember where the numbering was, so the status check below cannot
@@ -244,13 +274,12 @@ runs:
         echo "deployment #$number is COMPLETE"
 
         domain="$(disco domains:list --project "$PROJECT" --json | jq -r '.domains[0].name // empty')"
+        echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
         if [ -z "$domain" ]; then
           echo "::warning::project $PROJECT has no domain; does the server host have a wildcard DNS record?"
-          echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
           exit 0
         fi
         echo "url=https://$domain" >> "$GITHUB_OUTPUT"
-        echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
         echo "deployed to https://$domain"
 
     - name: Comment on the PR
@@ -262,6 +291,9 @@ runs:
         # infer it from a .git directory that is not there.
         GH_REPO: ${{ github.repository }}
         PR: ${{ github.event.pull_request.number }}
+        # GITHUB_SHA on a pull_request event is the merge commit, which is not
+        # a commit anyone can find in the PR. Name the head instead.
+        SHA: ${{ github.event.pull_request.head.sha }}
         URL: ${{ steps.deploy.outputs.url }}
         PROJECT: ${{ inputs.project }}
       run: |
@@ -271,7 +303,7 @@ runs:
           "<!-- disco-preview:$PROJECT -->" \
           "Preview: $URL" \
           "" \
-          "Deployed from \`$GITHUB_SHA\`. Torn down when this PR closes.")"
+          "Deployed from \`${SHA:0:7}\`. Torn down when this PR closes.")"
         # --edit-last keeps one comment instead of one per push, and fails
         # when there is nothing to edit yet.
         gh pr comment "$PR" --body "$body" --edit-last 2>/dev/null \
@@ -321,25 +353,60 @@ runs:
         set -euo pipefail
         [ -n "$PREFIX" ] || { echo "::error::'prefix' is required when mode is sweep" >&2; exit 1; }
 
-        open_prs="$(gh pr list --repo "$REPO" --state open --limit 500 --json number --jq '.[].number' | sort -u)"
-        projects="$(disco projects:list --json | jq -r --arg pre "$PREFIX" '.projects[]? | select(.name | startswith($pre)) | .name')"
-
+        if ! listing="$(disco projects:list --json 2>&1)" || ! printf '%s' "$listing" | jq -e . >/dev/null 2>&1; then
+          echo "::error::could not list projects: $listing" >&2
+          exit 1
+        fi
+        projects="$(printf '%s' "$listing" \
+          | jq -r --arg pre "$PREFIX" '.projects[]? | select(.name | startswith($pre)) | .name')"
         [ -n "$projects" ] || { echo "no projects match $PREFIX"; exit 0; }
 
-        removed=0
+        removed=0; kept=0; skipped=0; removed_names=""
         while IFS= read -r project; do
           [ -n "$project" ] || continue
           number="${project#"$PREFIX"}"
           # Only reap names that end in a PR number; anything else was not
           # ours to delete.
           case "$number" in
-            ''|*[!0-9]*) echo "skipping $project (no trailing PR number)"; continue ;;
+            ''|*[!0-9]*) echo "skipping $project (no trailing PR number)"; skipped=$((skipped + 1)); continue ;;
           esac
-          if printf '%s\n' "$open_prs" | grep -qx "$number"; then
-            continue
+          # Ask about this PR specifically rather than diffing against a list
+          # of open ones. A list that comes back empty because the API
+          # hiccuped is indistinguishable from every PR being closed, and this
+          # job deletes things unattended. Delete only on a definite answer.
+          if ! state="$(gh pr view "$number" --repo "$REPO" --json state --jq .state 2>&1)"; then
+            echo "::warning::could not check PR #$number ($state); leaving $project alone"
+            skipped=$((skipped + 1)); continue
           fi
-          echo "PR #$number is not open; removing $project"
+          case "$state" in
+            OPEN) kept=$((kept + 1)); continue ;;
+            CLOSED|MERGED) ;;
+            *) echo "::warning::unexpected state '$state' for PR #$number; leaving $project alone"
+               skipped=$((skipped + 1)); continue ;;
+          esac
+          echo "PR #$number is $state; removing $project"
           disco projects:remove "$project" --no-input
+          removed_names="${removed_names}${project}"$'\n'
           removed=$((removed + 1))
         done <<< "$projects"
-        echo "swept $removed project(s)"
+
+        # projects:remove warns and exits 0 when the API call fails, same as
+        # in teardown, so confirm what actually went.
+        if [ -n "$removed_names" ]; then
+          if ! listing="$(disco projects:list --json 2>&1)" || ! printf '%s' "$listing" | jq -e . >/dev/null 2>&1; then
+            echo "::error::could not confirm removals: $listing" >&2
+            exit 1
+          fi
+          still=""
+          while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            if printf '%s' "$listing" | jq -e --arg p "$p" '.projects[]? | select(.name == $p)' >/dev/null; then
+              still="${still}$p "
+            fi
+          done <<< "$removed_names"
+          if [ -n "$still" ]; then
+            echo "::error::still present after removal: $still" >&2
+            exit 1
+          fi
+        fi
+        echo "swept $removed, kept $kept, skipped $skipped"

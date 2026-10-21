@@ -95,10 +95,18 @@ d=$(setup)
 rc=$(PROJECT=site-pr-7 DIR="$d/build" EXCLUDE=$'**/*.mp4' PUBLIC_PATH="public" CLEAN_URLS=true run_step "$d" "Deploy")
 grep -q "::warning::exclude pattern" "$d/stdout" && bad "quiet on a recursive pattern" || ok "quiet on a recursive pattern"
 
-echo "deploy: respects an existing disco.json"
-d=$(setup); echo '{"version":"1.0","services":{"web":{"type":"static","publicPath":"public"}}}' > "$d/build/disco.json"
-rc=$(PROJECT=site-pr-7 DIR="$d/build" EXCLUDE="" PUBLIC_PATH="public" CLEAN_URLS=true run_step "$d" "Deploy")
-jq -e '.services.web.publicPath=="public"' "$d/build/disco.json" >/dev/null && ok "did not clobber it" || bad "did not clobber it"
+echo "deploy: a caller-supplied disco.json"
+d=$(setup)
+mkdir -p "$d/build/public"; mv "$d/build/index.html" "$d/build/public/index.html"
+echo "about" > "$d/build/public/about.html"
+echo '{"version":"1.0","services":{"web":{"type":"static","publicPath":"public"}}}' > "$d/build/disco.json"
+rc=$(PROJECT=site-pr-7 DIR="$d/build" EXCLUDE=$'**/*.mp4' PUBLIC_PATH="ignored" CLEAN_URLS=true run_step "$d" "Deploy")
+check "exit 0" "$rc" "0"
+jq -e '.services.web.publicPath=="public"' "$d/disco-preview-upload/disco.json" >/dev/null && ok "kept their publicPath" || bad "kept their publicPath"
+[ -f "$d/build/.dockerignore" ] && bad "never writes .dockerignore into their dir" || ok "never writes .dockerignore into their dir"
+[ -f "$d/disco-preview-upload/.dockerignore" ] && ok "excludes land in staging" || bad "excludes land in staging"
+[ -f "$d/disco-preview-upload/public/about/index.html" ] && ok "clean urls still applied" || bad "clean urls still applied"
+[ -d "$d/build/public/about" ] && bad "their build left untouched" || ok "their build left untouched"
 
 echo "deploy: a failed server-side deployment is not reported as success"
 d=$(setup)
@@ -184,6 +192,28 @@ echo "sweep: closing PR 1 must not take PR 10 with it"
 d=$(setup); printf 'site-pr-1\nsite-pr-10\n' > "$d/state"
 rc=$(STUB_OPEN_PRS="10" PREFIX=site-pr- REPO=o/r run_step "$d" "Sweep")
 grep -qx "site-pr-10" "$d/state" && ok "no prefix-collision deletion" || bad "no prefix-collision deletion"
+
+echo "sweep: an unanswerable PR check must never delete"
+d=$(setup); printf 'site-pr-1\nsite-pr-2\n' > "$d/state"
+rc=$(STUB_GH_VIEW_FAILS=1 STUB_OPEN_PRS="" PREFIX=site-pr- REPO=o/r run_step "$d" "Sweep")
+check "exit 0" "$rc" "0"
+[ "$(wc -l < "$d/state" | tr -d ' ')" = "2" ] && ok "kept both when gh could not answer" || bad "kept both when gh could not answer" "$(cat "$d/state")"
+grep -q "could not check PR" "$d/stdout" && ok "warns per project" || bad "warns per project"
+
+echo "sweep: a merged PR is reaped"
+d=$(setup); printf 'site-pr-5\n' > "$d/state"
+rc=$(STUB_OPEN_PRS="" STUB_CLOSED_STATE=MERGED PREFIX=site-pr- REPO=o/r run_step "$d" "Sweep")
+grep -qx "site-pr-5" "$d/state" && bad "merged counts as closed" || ok "merged counts as closed"
+
+echo "sweep: an unknown state is left alone"
+d=$(setup); printf 'site-pr-5\n' > "$d/state"
+rc=$(STUB_OPEN_PRS="" STUB_CLOSED_STATE=WEIRD PREFIX=site-pr- REPO=o/r run_step "$d" "Sweep")
+grep -qx "site-pr-5" "$d/state" && ok "unknown state is not a delete signal" || bad "unknown state is not a delete signal"
+
+echo "sweep: a removal that silently fails is caught"
+d=$(setup); printf 'site-pr-5\n' > "$d/state"
+rc=$(STUB_REMOVE_FAILS=1 STUB_OPEN_PRS="" PREFIX=site-pr- REPO=o/r run_step "$d" "Sweep")
+check "fails loudly" "$rc" "1"
 
 echo "comment: works without a checkout"
 node -e '

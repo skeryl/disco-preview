@@ -94,27 +94,31 @@ secrets.
 ## Keeping previews small
 
 Nothing in Disco prunes superseded static deployments. `remove_project_static_deployments_if_any`
-is called only when a project is deleted, so every push to a PR leaves another full copy of the
-build on disk until the PR closes. Container projects do not have this problem: the hourly
-`remove_unused_images` reaps every image that is not the project's current deployment.
+is called only when a project is deleted, so every push leaves another full copy of the build on
+the server until the PR closes. Container projects do not have this problem: the hourly
+`remove_unused_images` reaps every image that is not the project's current deployment. The
+`DELETE /api/projects/{name}/deployments/{n}` endpoint only cancels deployments that are still
+in flight, so a client cannot reclaim the space either.
 
-Until that asymmetry is fixed upstream, keep large immutable assets out of previews:
+`exclude` exists for that, but be careful with it: **an excluded file 404s in the preview.**
+Nothing falls back to production. Excluding `**/*.mp4` means a PR that adds or changes a video
+cannot show it, and every existing page that embeds one renders broken. That is usually the wrong
+trade for a site whose previews exist to review visual changes.
+
+Good candidates are files nothing ever requests. Precompressed `.br`/`.gz` sidecars qualify:
+Disco's `serve_static_site` sets a bare `file_server` with no `precompressed` key, and the route
+chain compresses with gzip/zstd on the fly, so the sidecars are never read.
 
 ```yaml
   exclude: |
-    **/*.mp4
-    **/*.webm
-    **/*.mov
+    **/*.br
+    **/*.gz
 ```
 
-**Patterns need `**/` to reach nested files.** `.dockerignore` matches from the root of the
-directory, so a bare `*.mp4` matches only `./foo.mp4` and silently skips
-`_app/immutable/assets/foo.mp4`. Nothing errors; the upload is just as large as before. The
+Patterns need `**/` to reach nested files. `.dockerignore` matches from the root of the
+directory, so a bare `*.gz` matches only `./foo.gz` and silently skips
+`_app/immutable/assets/foo.js.gz`. Nothing errors; the upload is just as large as before. The
 action warns when a pattern starts with `*.` for this reason.
-
-Content-hashed media is identical on every push and identical to production, so excluding it can
-turn a 98MB upload into about 2MB without changing anything a reviewer looks at. A PR that
-actually changes a video is the exception; re-include those paths with a `!` line.
 
 ## Why the build is staged one level down
 
