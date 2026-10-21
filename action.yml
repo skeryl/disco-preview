@@ -45,10 +45,11 @@ inputs:
     required: false
   public-path:
     description: >-
-      Subdirectory inside the upload that the build is staged at, and the
-      publicPath written into a generated disco.json. Cannot be '.': the
-      daemon's traversal guard rejects the upload root. Ignored when dir
-      already contains a disco.json.
+      Name of the subdirectory the build is staged in inside the upload, which
+      is also the publicPath written into the generated disco.json. It is an
+      internal staging detail and never appears in a URL, so the default suits
+      almost everyone. It cannot be '.', because the daemon refuses to serve
+      the upload root. Ignored when dir already contains a disco.json.
     required: false
     default: public
   disco-host:
@@ -214,11 +215,20 @@ runs:
           site_root="$upload/$(jq -r '.services.web.publicPath // "dist"' "$upload/disco.json")"
           echo "using the disco.json from $DIR"
         else
-          # deploy --dir wants a disco.json at the root of what it uploads, and
-          # the build cannot sit beside it: static_site_src_public_path resolves
-          # publicPath with abspath, which normalises the trailing "/." away,
-          # then demands the result start with "<project>/". The root resolves
-          # to exactly "<project>" and fails. So the files go one level down.
+          # The build goes in a subdirectory, with disco.json above it.
+          #
+          # `deploy --dir` uploads a directory that has to carry a disco.json
+          # at its top level, and that file's publicPath names the directory
+          # inside the upload holding the site. Those cannot be the same
+          # directory. Naming the upload root, by writing publicPath ".",
+          # is rejected: the daemon resolves publicPath and then requires the
+          # result to start with "<project>/", but the root resolves to
+          # exactly "<project>" with no trailing slash, so it trips a guard
+          # written to stop "../.." from escaping the project folder.
+          #
+          # So: upload/disco.json says publicPath is "public", and the build
+          # lands in upload/public/. The name is this action's own and never
+          # appears in a URL.
           case "$PUBLIC_PATH" in
             ''|'.'|'./'|/*|*..*)
               echo "::error::public-path cannot be '$PUBLIC_PATH'; the daemon rejects the upload root and paths outside it. Use a subdirectory name." >&2
