@@ -69,6 +69,7 @@ jobs:
 | `project` | deploy, teardown | | Project name, e.g. `site-pr-42` |
 | `prefix` | sweep | | Prefix marking preview projects, e.g. `site-pr-` |
 | `dir` | deploy | | Directory of built files |
+| `clean-urls` | no | `true` | Give each page a directory index so `/about` resolves |
 | `exclude` | no | | Newline-separated `.dockerignore` patterns to keep out of the upload |
 | `public-path` | no | `public` | Subdirectory the build is staged at inside the upload. Cannot be `.` |
 | `disco-host` | yes | | Disco server host |
@@ -133,6 +134,19 @@ action therefore hardlinks the build into `public/` inside a staging directory a
 
 If you supply your own `disco.json` in `dir`, the action assumes you have laid things out
 yourself and uploads the directory as-is.
+
+## Clean URLs
+
+Caddy's `file_server` serves what is on disk and nothing more. GitHub Pages, Netlify and Vercel
+all quietly try a `.html` extension, so `/about` finds `about.html`; Caddy returns 404. A static
+export that emits `about.html`, `journal.html` and `journal/nyc-subway.html` therefore 404s on
+every route but `/`.
+
+With `clean-urls` left on, the action hardlinks each page to `<name>/index.html` inside the
+staging copy, which `file_server` does serve for a directory. A page whose directory already
+exists, like `journal.html` beside `journal/`, gets its index placed inside. Your build directory
+is never modified. Turn it off with `clean-urls: false` if your output is already laid out this
+way.
 
 ## Deployment failures
 

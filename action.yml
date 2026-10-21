@@ -20,6 +20,13 @@ inputs:
   dir:
     description: 'Directory of built files to deploy. Required for deploy.'
     required: false
+  clean-urls:
+    description: >-
+      Give every page a directory index, so /about resolves to about.html the
+      way GitHub Pages and Netlify do. Caddy's file_server does not try a
+      .html extension on its own.
+    required: false
+    default: 'true'
   exclude:
     description: >-
       Newline-separated .dockerignore patterns for files to keep out of the upload.
@@ -119,6 +126,7 @@ runs:
         DIR: ${{ inputs.dir }}
         EXCLUDE: ${{ inputs.exclude }}
         PUBLIC_PATH: ${{ inputs.public-path }}
+        CLEAN_URLS: ${{ inputs.clean-urls }}
       run: |
         set -euo pipefail
         [ -n "$PROJECT" ] || { echo "::error::'project' is required when mode is deploy" >&2; exit 1; }
@@ -167,6 +175,24 @@ runs:
             '{version: "1.0", services: {web: {type: "static", publicPath: $p}}}' \
             > "$upload/disco.json"
           echo "staged $DIR at $PUBLIC_PATH/ with a generated disco.json"
+        fi
+
+        # Caddy's file_server serves what is on disk and nothing more: it does
+        # not try a .html extension the way GitHub Pages and Netlify do, so
+        # /about 404s next to an about.html. Give each page a directory index
+        # too. Only inside the staging copy, never in the caller's build.
+        if [ "$CLEAN_URLS" = "true" ] && [ "$upload" != "$DIR" ]; then
+          linked=0
+          while IFS= read -r -d '' f; do
+            d="${f%.html}"
+            # journal.html can sit beside a real journal/ directory; the
+            # index belongs inside it either way.
+            [ -e "$d/index.html" ] && continue
+            mkdir -p "$d"
+            ln "$f" "$d/index.html" 2>/dev/null || cp "$f" "$d/index.html"
+            linked=$((linked + 1))
+          done < <(find "$upload/$PUBLIC_PATH" -type f -name '*.html' ! -name 'index.html' -print0)
+          echo "clean urls: added $linked directory index(es)"
         fi
 
         # The CLI applies the directory's own .dockerignore to the upload, so
