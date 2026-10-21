@@ -4,6 +4,14 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
+
+# The runners use bash 5; macOS ships 3.2. They disagree on `set -u` for
+# things like ${unset:0:7}, which bash 3.2 accepts and bash 5 aborts on, so a
+# green run here is not proof of a green run in CI.
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+  printf '\033[33mnote\033[0m bash %s: CI runs bash 5 and is stricter. Trust CI over this run.\n' \
+    "${BASH_VERSION%%(*}"
+fi
 PASS=0; FAIL=0
 
 extract() { # extract <step name> -> script on stdout
@@ -223,9 +231,14 @@ node -e '
   process.exit(s.env && s.env.GH_REPO ? 0 : 1);
 ' && ok "sets GH_REPO so gh needs no .git" || bad "sets GH_REPO so gh needs no .git"
 
+echo "comment: survives an unset head sha"
+d=$(setup)
+rc=$(GH_TOKEN=t PR=7 URL="https://site-pr-7.disco.test" PROJECT=site-pr-7 run_step "$d" "Comment on the PR")
+check "exit 0 with no SHA in env" "$rc" "0"
+
 echo "comment: falls back to create when there is nothing to edit"
 d=$(setup)
-rc=$(GH_TOKEN=t PR=7 URL="https://site-pr-7.disco.test" PROJECT=site-pr-7 STUB_NO_PRIOR_COMMENT=1 run_step "$d" "Comment on the PR")
+rc=$(GH_TOKEN=t PR=7 SHA=abcdef1234567890 URL="https://site-pr-7.disco.test" PROJECT=site-pr-7 STUB_NO_PRIOR_COMMENT=1 run_step "$d" "Comment on the PR")
 check "exit 0" "$rc" "0"
 [ "$(grep -c 'gh pr comment' "$d/calls")" = "2" ] && ok "tried edit, then created" || bad "tried edit, then created" "$(cat "$d/calls")"
 

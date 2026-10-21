@@ -299,11 +299,16 @@ runs:
       run: |
         set -euo pipefail
         [ -n "$URL" ] || exit 0
+        # head.sha is empty outside a pull_request event, and bash 5 under
+        # `set -u` aborts on a substring of an unset variable where bash 3.2
+        # quietly yields "", so default it before slicing.
+        sha="${SHA:-${GITHUB_SHA:-}}"
+        from="${sha:+ from \`${sha:0:7}\`}"
         body="$(printf '%s\n' \
           "<!-- disco-preview:$PROJECT -->" \
           "Preview: $URL" \
           "" \
-          "Deployed from \`${SHA:0:7}\`. Torn down when this PR closes.")"
+          "Deployed${from}. Torn down when this PR closes.")"
         # --edit-last keeps one comment instead of one per push, and fails
         # when there is nothing to edit yet.
         gh pr comment "$PR" --body "$body" --edit-last 2>/dev/null \
