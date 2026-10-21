@@ -69,6 +69,7 @@ jobs:
 | `project` | deploy, teardown | | Project name, e.g. `site-pr-42` |
 | `prefix` | sweep | | Prefix marking preview projects, e.g. `site-pr-` |
 | `dir` | deploy | | Directory of built files |
+| `skip-if-superseded` | no | `true` | Skip when the PR head has moved past the commit this run built |
 | `clean-urls` | no | `true` | Give each page a directory index so `/about` resolves |
 | `exclude` | no | | Newline-separated `.dockerignore` patterns to keep out of the upload |
 | `public-path` | no | `public` | Subdirectory the build is staged at inside the upload. Cannot be `.` |
@@ -138,6 +139,32 @@ action therefore hardlinks the build into `public/` inside a staging directory a
 
 If you supply your own `disco.json` in `dir`, the action assumes you have laid things out
 yourself and uploads the directory as-is.
+
+## Two pushes in quick succession
+
+Disco numbers deployments when they arrive and the queue runs them in that order, so **whichever
+run calls `disco deploy` last wins, regardless of which commit it carries.** Two pushes close
+together can finish out of order, and the preview is then left showing the older commit while the
+PR has moved on.
+
+Set a concurrency group so only the newest run survives. This is the actual fix and it belongs in
+your workflow, because an action cannot set concurrency for the job that uses it:
+
+```yaml
+  preview:
+    concurrency:
+      group: disco-preview-${{ github.event.number }}
+      cancel-in-progress: true
+```
+
+`skip-if-superseded` is the belt to that's braces: before deploying, the action compares the PR's
+current head against the commit this run built, and steps aside when they differ. It helps when
+concurrency is not configured, and it stops a manual re-run of an old job from republishing a
+stale preview.
+
+Note the deliberate asymmetry with the sweep. There, a check that cannot be answered means do
+nothing, because a wrong deletion is unrecoverable. Here, a check that cannot be answered means
+go ahead, because the worst case is a stale preview that the next push corrects.
 
 ## Clean URLs
 

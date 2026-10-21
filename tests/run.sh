@@ -61,6 +61,35 @@ jq -e '.services.web.type=="static" and .services.web.publicPath=="public"' "$d/
 [ -f "$d/build/disco.json" ] && bad "leaves the build dir alone" || ok "leaves the build dir alone"
 grep -q "url=https://site-pr-7.disco.test" "$d/output" && ok "set the url output" || bad "set the url output" "$(cat "$d/output")"
 
+echo "deploy: a superseded commit does not publish"
+d=$(setup)
+rc=$(PROJECT=site-pr-7 DIR="$d/build" EXCLUDE="" PUBLIC_PATH="public" CLEAN_URLS=true \
+     PR=7 SHA=aaaaaaa STUB_PR_HEAD=bbbbbbb run_step "$d" "Deploy")
+check "exit 0" "$rc" "0"
+grep -q "skipping so the newer run publishes" "$d/stdout" && ok "skips when the head moved on" || bad "skips when the head moved on" "$(cat "$d/stdout")"
+grep -q "disco deploy " "$d/calls" && bad "deploys nothing" || ok "deploys nothing"
+grep -q "^url=" "$d/output" && bad "publishes no url" || ok "publishes no url"
+
+echo "deploy: the current commit does publish"
+d=$(setup)
+rc=$(PROJECT=site-pr-7 DIR="$d/build" EXCLUDE="" PUBLIC_PATH="public" CLEAN_URLS=true \
+     PR=7 SHA=aaaaaaa STUB_PR_HEAD=aaaaaaa run_step "$d" "Deploy")
+check "exit 0" "$rc" "0"
+grep -q "disco deploy " "$d/calls" && ok "deploys when head matches" || bad "deploys when head matches"
+
+echo "deploy: an unanswerable head check still deploys"
+d=$(setup)
+rc=$(STUB_GH_VIEW_FAILS=1 PROJECT=site-pr-7 DIR="$d/build" EXCLUDE="" PUBLIC_PATH="public" CLEAN_URLS=true \
+     PR=7 SHA=aaaaaaa run_step "$d" "Deploy")
+check "exit 0" "$rc" "0"
+grep -q "disco deploy " "$d/calls" && ok "uncertainty favours deploying, unlike the sweep" || bad "uncertainty favours deploying, unlike the sweep"
+
+echo "deploy: the guard can be turned off"
+d=$(setup)
+rc=$(SKIP_SUPERSEDED=false PROJECT=site-pr-7 DIR="$d/build" EXCLUDE="" PUBLIC_PATH="public" CLEAN_URLS=true \
+     PR=7 SHA=aaaaaaa STUB_PR_HEAD=bbbbbbb run_step "$d" "Deploy")
+grep -q "disco deploy " "$d/calls" && ok "respects skip-if-superseded false" || bad "respects skip-if-superseded false"
+
 echo "deploy: clean urls"
 d=$(setup)
 mkdir -p "$d/build/journal"

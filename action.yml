@@ -23,6 +23,13 @@ inputs:
   dir:
     description: 'Directory of built files to deploy. Needed when mode is deploy.'
     required: false
+  skip-if-superseded:
+    description: >-
+      Skip the deploy when the PR head has moved past the commit this run
+      built. Disco queues deployments by arrival rather than by commit, so a
+      slow run landing last would leave the preview behind the PR.
+    required: false
+    default: 'true'
   clean-urls:
     description: >-
       Give every page a directory index, so /about resolves to about.html the
@@ -133,12 +140,36 @@ runs:
         EXCLUDE: ${{ inputs.exclude }}
         PUBLIC_PATH: ${{ inputs.public-path }}
         CLEAN_URLS: ${{ inputs.clean-urls }}
+        SKIP_SUPERSEDED: ${{ inputs.skip-if-superseded }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        GH_REPO: ${{ github.repository }}
+        PR: ${{ github.event.pull_request.number }}
+        SHA: ${{ github.event.pull_request.head.sha }}
       run: |
         set -euo pipefail
         [ -n "$PROJECT" ] || { echo "::error::'project' is required when mode is deploy" >&2; exit 1; }
         [ -n "$DIR" ] || { echo "::error::'dir' is required when mode is deploy" >&2; exit 1; }
         [ -d "$DIR" ] || { echo "::error::dir '$DIR' does not exist" >&2; exit 1; }
         [ -n "${RUNNER_TEMP:-}" ] || { echo "::error::RUNNER_TEMP is not set" >&2; exit 1; }
+
+        # Disco numbers deployments on arrival and the queue runs in that
+        # order, so whichever run calls `disco deploy` last wins no matter
+        # which commit it carries. Two pushes close together can finish out of
+        # order and leave the preview showing the older one. If the head has
+        # already moved past what this run built, the newer run is the one
+        # that should publish.
+        #
+        # Unlike the sweep, an unanswerable check here means carry on: the
+        # cost of being wrong is a stale preview that the next push corrects,
+        # not a deletion that cannot be undone.
+        if [ "${SKIP_SUPERSEDED:-true}" = "true" ] && [ -n "${PR:-}" ] && [ -n "${SHA:-}" ]; then
+          if head="$(gh pr view "$PR" --json headRefOid --jq .headRefOid 2>/dev/null)" \
+            && [ -n "$head" ] && [ "$head" != "$SHA" ]; then
+            echo "::warning::PR head is now ${head:0:7} but this run built ${SHA:0:7}; skipping so the newer run publishes"
+            echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+        fi
 
         # projects:add fails when the project exists, and it will on every
         # push after the first, so look before creating. A failed list has to
@@ -157,7 +188,8 @@ runs:
           # server host to have a wildcard DNS record.
           if ! add_out="$(disco projects:add --name "$PROJECT" 2>&1)"; then
             # Two pushes in quick succession each check, then each create.
-            # Losing that race is fine as long as the project now exists.
+            # Only one can win, and the loser has nothing to do: creating a
+            # project deploys nothing, so both runs carry on from here.
             if disco projects:list --json 2>/dev/null \
               | jq -e --arg p "$PROJECT" '.projects[]? | select(.name == $p)' >/dev/null; then
               echo "project $PROJECT appeared concurrently; carrying on"
@@ -206,7 +238,7 @@ runs:
         # Caddy's file_server serves what is on disk and nothing more: it does
         # not try a .html extension the way GitHub Pages and Netlify do, so
         # /about 404s next to an about.html. Give each page a directory index.
-        if [ "$CLEAN_URLS" = "true" ]; then
+        if [ "${CLEAN_URLS:-true}" = "true" ]; then
           if [ ! -d "$site_root" ]; then
             echo "::warning::publicPath does not resolve to a directory; skipping clean urls"
           else

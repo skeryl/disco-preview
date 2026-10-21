@@ -8,6 +8,10 @@ if [ "${1:-}" = "pr" ] && [ "${2:-}" = "list" ]; then
 fi
 if [ "${1:-}" = "pr" ] && [ "${2:-}" = "view" ]; then
   n="${3:-}"
+  if printf '%s\n' "$@" | grep -q "headRefOid"; then
+    if [ "${STUB_GH_VIEW_FAILS:-}" = "1" ]; then echo "api down" >&2; exit 1; fi
+    echo "${STUB_PR_HEAD:-deadbeef}"; exit 0
+  fi
   if [ "${STUB_GH_VIEW_FAILS:-}" = "1" ]; then
     echo "API rate limit exceeded" >&2; exit 1
   fi
