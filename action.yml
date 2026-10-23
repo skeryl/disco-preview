@@ -124,7 +124,10 @@ runs:
           exit 1
         fi
         [ -n "${RUNNER_TEMP:-}" ] || { echo "::error::RUNNER_TEMP is not set" >&2; exit 1; }
-        cfg="${RUNNER_TEMP}/disco-config.json"
+        # Its own directory: the CLI chmods the directory holding its config
+        # to 700, and RUNNER_TEMP is shared with every other step in the job.
+        mkdir -p -m 700 "${RUNNER_TEMP}/disco"
+        cfg="${RUNNER_TEMP}/disco/config.json"
         jq -n --arg n "$DISCO_NAME" --arg h "$DISCO_HOST" --arg k "$DISCO_API_KEY" \
           '{discos: {($n): {name: $n, host: $h, apiKey: $k}}}' > "$cfg"
         chmod 600 "$cfg"
@@ -148,6 +151,18 @@ runs:
         SHA: ${{ github.event.pull_request.head.sha }}
       run: |
         set -euo pipefail
+        # The CLI can write notices to stderr ahead of its JSON (it tightens
+        # the permissions of the directory holding its config and says so),
+        # so parse stdout alone. stderr is kept for the error message.
+        list_projects() {
+          local out err rc=0
+          err="$(mktemp)"
+          out="$(disco projects:list --json 2>"$err")" || rc=$?
+          if [ "$rc" -eq 0 ] && printf '%s' "$out" | jq -e . >/dev/null 2>&1; then
+            rm -f "$err"; printf '%s' "$out"; return 0
+          fi
+          printf '%s\n' "$out"; cat "$err"; rm -f "$err"; return 1
+        }
         [ -n "$PROJECT" ] || { echo "::error::'project' is required when mode is deploy" >&2; exit 1; }
         [ -n "$DIR" ] || { echo "::error::'dir' is required when mode is deploy" >&2; exit 1; }
         [ -d "$DIR" ] || { echo "::error::dir '$DIR' does not exist" >&2; exit 1; }
@@ -176,7 +191,7 @@ runs:
         # push after the first, so look before creating. A failed list has to
         # be told apart from an empty one, or an unreachable server reads as
         # "not there" and we try to create what may already exist.
-        if ! listing="$(disco projects:list --json 2>&1)" || ! printf '%s' "$listing" | jq -e . >/dev/null 2>&1; then
+        if ! listing="$(list_projects)"; then
           echo "::error::could not list projects: $listing" >&2
           exit 1
         fi
@@ -363,11 +378,23 @@ runs:
         PROJECT: ${{ inputs.project }}
       run: |
         set -euo pipefail
+        # The CLI can write notices to stderr ahead of its JSON (it tightens
+        # the permissions of the directory holding its config and says so),
+        # so parse stdout alone. stderr is kept for the error message.
+        list_projects() {
+          local out err rc=0
+          err="$(mktemp)"
+          out="$(disco projects:list --json 2>"$err")" || rc=$?
+          if [ "$rc" -eq 0 ] && printf '%s' "$out" | jq -e . >/dev/null 2>&1; then
+            rm -f "$err"; printf '%s' "$out"; return 0
+          fi
+          printf '%s\n' "$out"; cat "$err"; rm -f "$err"; return 1
+        }
         [ -n "$PROJECT" ] || { echo "::error::'project' is required when mode is teardown" >&2; exit 1; }
         # Without this, an unreachable server looks exactly like a project
         # that is already gone, and teardown reports success having done
         # nothing. That is the failure this job exists to prevent.
-        if ! listing="$(disco projects:list --json 2>&1)" || ! printf '%s' "$listing" | jq -e . >/dev/null 2>&1; then
+        if ! listing="$(list_projects)"; then
           echo "::error::could not list projects: $listing" >&2
           exit 1
         fi
@@ -379,7 +406,7 @@ runs:
         disco projects:remove "$PROJECT" --no-input
         # projects:remove downgrades API failures to a warning and exits 0,
         # so confirm by listing rather than trusting the exit code.
-        if ! listing="$(disco projects:list --json 2>&1)" || ! printf '%s' "$listing" | jq -e . >/dev/null 2>&1; then
+        if ! listing="$(list_projects)"; then
           echo "::error::could not confirm removal: $listing" >&2
           exit 1
         fi
@@ -398,9 +425,21 @@ runs:
         REPO: ${{ github.repository }}
       run: |
         set -euo pipefail
+        # The CLI can write notices to stderr ahead of its JSON (it tightens
+        # the permissions of the directory holding its config and says so),
+        # so parse stdout alone. stderr is kept for the error message.
+        list_projects() {
+          local out err rc=0
+          err="$(mktemp)"
+          out="$(disco projects:list --json 2>"$err")" || rc=$?
+          if [ "$rc" -eq 0 ] && printf '%s' "$out" | jq -e . >/dev/null 2>&1; then
+            rm -f "$err"; printf '%s' "$out"; return 0
+          fi
+          printf '%s\n' "$out"; cat "$err"; rm -f "$err"; return 1
+        }
         [ -n "$PREFIX" ] || { echo "::error::'prefix' is required when mode is sweep" >&2; exit 1; }
 
-        if ! listing="$(disco projects:list --json 2>&1)" || ! printf '%s' "$listing" | jq -e . >/dev/null 2>&1; then
+        if ! listing="$(list_projects)"; then
           echo "::error::could not list projects: $listing" >&2
           exit 1
         fi
@@ -445,7 +484,7 @@ runs:
         # projects:remove warns and exits 0 when the API call fails, same as
         # in teardown, so confirm what actually went.
         if [ -n "$removed_names" ]; then
-          if ! listing="$(disco projects:list --json 2>&1)" || ! printf '%s' "$listing" | jq -e . >/dev/null 2>&1; then
+          if ! listing="$(list_projects)"; then
             echo "::error::could not confirm removals: $listing" >&2
             exit 1
           fi
