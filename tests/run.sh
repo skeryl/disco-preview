@@ -236,7 +236,29 @@ grep -q "disco-host is empty" "$d/stderr" && ok "names the missing input" || bad
 d=$(setup)
 rc=$(DISCO_HOST="h" DISCO_API_KEY="k" DISCO_NAME=ci run_step "$d" "Write the CLI config")
 check "accepts both set" "$rc" "0"
-jq -e '.discos.ci.host=="h"' "$d/disco-config.json" >/dev/null && ok "writes the config" || bad "writes the config"
+jq -e '.discos.ci.host=="h"' "$d/disco/config.json" >/dev/null && ok "writes the config" || bad "writes the config"
+[ "$(stat -c %a "$d/disco" 2>/dev/null || stat -f %Lp "$d/disco")" = "700" ] && ok "config lives in its own 700 directory" || bad "config lives in its own 700 directory"
+
+echo "a CLI notice on stderr does not break JSON parsing"
+d=$(setup); echo "site-pr-7" > "$d/state"
+rc=$(STUB_STDERR_NOTICE=1 PROJECT=site-pr-7 DIR="$d/build" EXCLUDE="" PUBLIC_PATH="public" CLEAN_URLS=true run_step "$d" "Deploy")
+check "deploy succeeds" "$rc" "0"
+grep -q "projects:add" "$d/calls" && bad "deploy still sees the existing project" || ok "deploy still sees the existing project"
+d=$(setup); echo "site-pr-7" > "$d/state"
+rc=$(STUB_STDERR_NOTICE=1 PROJECT=site-pr-7 run_step "$d" "Teardown")
+check "teardown succeeds" "$rc" "0"
+grep -qx "site-pr-7" "$d/state" && bad "teardown removed the project" || ok "teardown removed the project"
+d=$(setup); printf 'site-pr-1\nsite-pr-2\n' > "$d/state"
+rc=$(STUB_STDERR_NOTICE=1 STUB_OPEN_PRS="2" PREFIX=site-pr- REPO=o/r run_step "$d" "Sweep")
+check "sweep succeeds" "$rc" "0"
+grep -qx "site-pr-1" "$d/state" && bad "sweep reaped the closed PR" || ok "sweep reaped the closed PR"
+grep -qx "site-pr-2" "$d/state" && ok "sweep kept the open PR" || bad "sweep kept the open PR"
+
+echo "an unreachable server still reports the CLI's stderr"
+d=$(setup); echo "site-pr-7" > "$d/state"
+rc=$(STUB_UNREACHABLE=1 PROJECT=site-pr-7 run_step "$d" "Teardown")
+check "fails" "$rc" "1"
+grep -q "could not reach the server" "$d/stderr" && ok "error names the cause" || bad "error names the cause" "$(cat "$d/stderr")"
 
 echo "sweep"
 d=$(setup); printf 'site-pr-1\nsite-pr-2\nsite-pr-10\nsite-prod\nother\n' > "$d/state"

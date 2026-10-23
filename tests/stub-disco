@@ -18,6 +18,12 @@ case "$cmd" in
     if [ "${STUB_UNREACHABLE:-}" = "1" ]; then
       echo " âº   Error: could not reach the server" >&2; exit 2
     fi
+    # The real CLI announces, on stderr, that it tightened the permissions
+    # of the directory holding its config. It did this before every JSON
+    # listing on 0.5.74 and broke parsing when stderr was merged in.
+    if [ "${STUB_STDERR_NOTICE:-}" = "1" ]; then
+      echo "Permissions of $RUNNER_TEMP set to 700 (were 755): it holds API keys." >&2
+    fi
     projects_json ;;
   projects:add)
     name=""
